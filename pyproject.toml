@@ -1,0 +1,22 @@
+[project]
+name = "ohmycli"
+version = "0.1.0"
+description = "Un CLI modular y simple."
+readme = "README.md"
+authors = [
+    { name = "Oscar" }
+]
+requires-python = ">=3.10"
+
+# Dependencias (por ahora vacío)
+dependencies = []
+
+# Para que puedas hacer: python -m mycli
+[project.scripts]
+ohmycli = "src.mycli.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
