@@ -1,3 +1,12 @@
+# Config local del usuario 
 config.json
-__pycache__
+
+# Caches de Python
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Entornos virtuales 
+venv/
+.env/
