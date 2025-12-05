@@ -14,3 +14,7 @@ venv/
 # Carpetas
 screenshots/
 ohmycli.egg-info/
+build/
+
+# Archivo de Instalacion
+install.py
