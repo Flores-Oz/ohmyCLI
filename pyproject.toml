@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ohmycli"
-version = "0.17.0"
+version = "1.0.0"
 description = "Un CLI modular y simple."
 readme = "README.md"
 authors = [{ name = "Flores-Oz" }]
