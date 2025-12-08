@@ -14,8 +14,10 @@ def register_parser(subparsers):
     notes_sub.add_parser('list', help='Listar notas')
     view_p = notes_sub.add_parser('view', help='Ver nota por índice')
     view_p.add_argument('index', type=int)
-    edit_p = notes_sub.add_parser('edit', help='Editar nota por índice')
+    # edit: por defecto inline; usar --external para abrir $EDITOR/notepad
+    edit_p = notes_sub.add_parser('edit', help='Editar nota por índice (inline por defecto)')
     edit_p.add_argument('index', type=int)
+    edit_p.add_argument('--external', action='store_true', help='Forzar uso de editor externo ($EDITOR o notepad)')
     del_p = notes_sub.add_parser('del', help='Borrar nota por índice')
     del_p.add_argument('index', type=int)
     del_p.add_argument('--yes', action='store_true', help='Confirmar borrado sin preguntar')
@@ -33,7 +35,8 @@ def run(args, cfg):
     elif cmd == 'view':
         _view(notes_path, args.index)
     elif cmd == 'edit':
-        _edit(notes_path, args.index)
+        external = getattr(args, 'external', False)
+        _edit(notes_path, args.index, external=external)
     elif cmd == 'del':
         _del(notes_path, args.index, yes=args.yes)
     else:
@@ -51,7 +54,7 @@ def _ensure_folder(p: Path, create_if_missing=True):
             return False
     return True
 
-def _safe_filename(name: str) -> str:
+def _safe_filename(name: str) -> Optional[str]:
     # Normalizar nombre simple: quitar slashes, trim
     name = name.strip()
     name = name.replace('/', '_').replace('\\', '_')
@@ -135,7 +138,12 @@ def _view(notes_path, index):
     print(target.read_text(encoding='utf-8'))
 
 # ---------- edit ----------
-def _edit(notes_path, index):
+def _edit(notes_path, index, external: bool = False):
+    """
+    Edita una nota:
+      - por defecto: edición inline en consola (_edit_inline)
+      - si external==True y hay $EDITOR (o Windows: notepad), usa editor externo temporal
+    """
     p = Path(notes_path)
     if not _ensure_folder(p, create_if_missing=False):
         return
@@ -144,43 +152,56 @@ def _edit(notes_path, index):
         print("Índice fuera de rango.")
         return
     target = files[index-1]
-    # Preferir editor externo
-    editor = os.environ.get('EDITOR')
-    if not editor and os.name == 'nt':
-        editor = 'notepad'  # fallback Windows
-    if editor:
-        # abrir temp copy para editar y luego mover a origen si cambió
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp", mode='w', encoding='utf-8') as tf:
-            tf_name = tf.name
-            tf.write(target.read_text(encoding='utf-8'))
-        try:
-            subprocess.run([editor, tf_name])
-        except Exception as ex:
-            print(f"No pude abrir el editor '{editor}': {ex}")
-            # caemos a modo inline
-            _edit_inline(target)
+
+    # si forzaron editor externo y existe, usar; si no, caeremos a inline
+    if external:
+        editor = os.environ.get('EDITOR')
+        if not editor and os.name == 'nt':
+            editor = 'notepad'
+        if editor:
+            # abrir temp copy para editar y luego mover a origen si cambió
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".tmp", mode='w', encoding='utf-8') as tf:
+                tf_name = tf.name
+                tf.write(target.read_text(encoding='utf-8'))
             try:
-                os.unlink(tf_name)
+                subprocess.run([editor, tf_name])
+            except Exception as ex:
+                print(f"No pude abrir el editor '{editor}': {ex}")
+                # caemos a modo inline
+                try:
+                    os.unlink(tf_name)
+                except Exception:
+                    pass
+                _edit_inline(target)
+                return
+            # después de editar, leer el temp y reemplazar
+            try:
+                new_content = Path(tf_name).read_text(encoding='utf-8')
+                Path(tf_name).unlink(missing_ok=True)
             except Exception:
-                pass
+                print("Error leyendo temporal del editor.")
+                return
+            if new_content == target.read_text(encoding='utf-8'):
+                print("No hubo cambios.")
+                return
+            target.write_text(new_content, encoding='utf-8')
+            print(f"{target.name} actualizado (externo).")
             return
-        # después de editar, leer el temp y reemplazar
-        new_content = Path(tf_name).read_text(encoding='utf-8')
-        Path(tf_name).unlink(missing_ok=True)
-        if new_content == target.read_text(encoding='utf-8'):
-            print("No hubo cambios.")
+        else:
+            print("No se encontró editor externo ($EDITOR) y --external fue solicitado; usando edición inline.")
+            _edit_inline(target)
             return
-        target.write_text(new_content, encoding='utf-8')
-        print(f"{target.name} actualizado.")
-        return
-    else:
-        # editor no disponible -> modo inline
-        _edit_inline(target)
+
+    # por defecto: edición inline
+    _edit_inline(target)
 
 def _edit_inline(target: Path):
     print(f"Editando (inline) {target.name}. Se mostrará contenido actual y podrás reescribirlo.")
     print("=== CONTENIDO ACTUAL ===")
-    print(target.read_text(encoding='utf-8'))
+    try:
+        print(target.read_text(encoding='utf-8'))
+    except Exception as ex:
+        print(f"(No pude leer el archivo: {ex})")
     print("=== INGRESA NUEVO CONTENIDO. Termina con '.' en línea sola ===")
     lines = []
     while True:
@@ -192,16 +213,16 @@ def _edit_inline(target: Path):
             break
         lines.append(line)
     new = '\n'.join(lines).strip()
+    if new == target.read_text(encoding='utf-8').strip():
+        print("No hubo cambios.")
+        return
     if not new:
         ans = input("El nuevo contenido está vacío. ¿Deseas cancelar la edición? (y/N): ").strip().lower()
-        if ans != 'y':
-            target.write_text(new + '\n', encoding='utf-8')
-            print(f"{target.name} actualizado (vacío).")
-        else:
+        if ans == 'y':
             print("Edición cancelada.")
-        return
+            return
     target.write_text(new + '\n', encoding='utf-8')
-    print(f"{target.name} actualizado.")
+    print(f"{target.name} actualizado (inline).")
 
 # ---------- delete ----------
 def _del(notes_path, index, yes=False):
