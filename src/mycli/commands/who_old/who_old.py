@@ -11,7 +11,14 @@ from mycli.utils import (
     prompt_choice,
     _norm_name,
     looks_like_season_dir,
+    list_with_watch_status, 
+    mark_watched, mark_unwatched, 
+    mark_all_in_dir, 
+    load_watch_state, 
+    save_watch_state, 
+    episode_key,
 )
+
 
 # --- ordinal helpers ---
 ORDINAL_WORDS = {
@@ -23,10 +30,7 @@ ORDINAL_WORDS = {
     "sexto": 6, "sexta": 6,
     "septimo": 7, "septima": 7, "séptimo": 7, "séptima": 7,
     "octavo": 8, "octava": 8,
-    "noveno": 9, "novena": 9,
-    "decimo": 10, "décimo": 10, "décima": 10,
-    "undecimo": 11, "once": 11, "onceavo": 11,
-    "doceavo": 12, "doce": 12,
+    #solo llega hasta el Octavo Dr
 }
 
 def extract_ordinal_from_name(name: str) -> Optional[int]:
@@ -46,7 +50,7 @@ def extract_ordinal_from_name(name: str) -> Optional[int]:
     # ingles
     eng = {
         "first":1,"second":2,"third":3,"fourth":4,"fifth":5,"sixth":6,
-        "seventh":7,"eighth":8,"ninth":9,"tenth":10,"eleventh":11,"twelfth":12
+        "seventh":7,"eighth":8
     }
     for w, v in eng.items():
         if re.search(r'\b' + re.escape(w) + r'\b', n):
@@ -98,62 +102,84 @@ def run(args, cfg):
     # ordenar por ordinal (None -> grande) y luego por nombre
     doctor_dirs.sort(key=lambda t: (t[2], _norm_name(t[1])))
 
-    # mostrar lista de Doctors
-    print("Doctores / grupos encontrados:")
-    for i, (p, disp, ordv) in enumerate(doctor_dirs, 1):
-        num = ordv if ordv < 10**6 else "-"
-        print(f"[{i}] {disp}  ({p})  orden={num}")
+    # --- Bucle principal: seleccionar doctor, volver aquí al pulsar 'q' en submenús ---
+    while True:
+        # mostrar lista de Doctors (solo nombre, sin path ni orden)
+        print("\nDoctores / grupos encontrados:")
+        for i, (p, disp, ordv) in enumerate(doctor_dirs, 1):
+            print(f"[{i}] {disp}")
 
-    idx = prompt_choice(len(doctor_dirs), "Selecciona Doctor")
-    if idx is None:
-        return
-
-    selected_doctor = doctor_dirs[idx][0]
-
-    # dentro del Doctor: subcarpetas y archivos directos
-    subdirs = [d for d in selected_doctor.iterdir() if d.is_dir()]
-    media_here = list_media_files(selected_doctor)
-
-    seasons = []
-    for d in subdirs:
-        if looks_like_season_dir(d.name) or list_media_files(d) or any(list_media_files(sd) for sd in d.iterdir() if sd.is_dir()):
-            seasons.append(d)
-
-    if seasons:
-        print("Temporadas / carpetas internas:")
-        for i, s in enumerate(seasons, 1):
-            print(f"[{i}] {s.name}  ({s})")
-        sidx = prompt_choice(len(seasons), "Selecciona temporada/carpeta")
-        if sidx is None:
+        idx = prompt_choice(len(doctor_dirs), "Selecciona Doctor (q para salir)")
+        if idx is None:
+            # el usuario quiere salir del subcomando who-old -> retornamos al main
+            print("Saliendo de who-old.")
             return
-        season_path = seasons[sidx]
+
+        selected_doctor = doctor_dirs[idx][0]
+
+        # dentro del Doctor: subcarpetas y archivos directos
+        subdirs = [d for d in selected_doctor.iterdir() if d.is_dir()]
+        media_here = list_media_files(selected_doctor)
+
+        # detectar temporadas dentro del doctor
+        seasons = []
+        for d in subdirs:
+            if looks_like_season_dir(d.name) or list_media_files(d) or any(list_media_files(sd) for sd in d.iterdir() if sd.is_dir()):
+                seasons.append(d)
+
+        # si hay temporadas, pedir seleccionar temporada; si no, usar media directos
+        if seasons:
+            print("\nTemporadas / carpetas internas:")
+            for i, s in enumerate(seasons, 1):
+                print(f"[{i}] {s.name}")
+            sidx = prompt_choice(len(seasons), "Selecciona temporada/carpeta (q para volver)")
+            if sidx is None:
+                # volver al listado de doctors
+                continue
+            season_path = seasons[sidx]
+
+            episodes = list_episodes_for_season(season_path)
+            if not episodes:
+                print("No se encontraron episodios en", season_path)
+                # volver al listado de seasons/doctors
+                continue
+
+            # Llamada al menú interactivo (reproduce + marcar vistos)
+            episode_menu_and_play(episodes, season_path, player, cfg)
+            # al volver del menú de episodios, permanecemos en el doctor seleccionado (o volvemos a doctor list)
+            continue
+
+        # si no hay temporadas pero sí archivos multimedia directos en la carpeta del Doctor
+        if media_here:
+            episodes = media_here
+            # usar el mismo menú interactivo, pasándole la carpeta del Doctor como 'season_path'
+            episode_menu_and_play(episodes, selected_doctor, player, cfg)
+            # al volver del menú de episodios regresamos al listado de doctors
+            continue
+
+        # fallback: buscar temporadas más abajo
+        candidates = detect_season_dirs(selected_doctor, max_depth=2)
+        if not candidates:
+            print("No se encontraron episodios ni temporadas bajo", selected_doctor)
+            # volver al listado de doctors
+            continue
+
+        print("\nTemporadas candidatas detectadas:")
+        for i, (p, disp, score) in enumerate(candidates, 1):
+            print(f"[{i}] {disp}  score={score}")
+        cidx = prompt_choice(len(candidates), "Selecciona temporada (q para volver)")
+        if cidx is None:
+            continue
+        season_path = candidates[cidx][0]
         episodes = list_episodes_for_season(season_path)
         if not episodes:
             print("No se encontraron episodios en", season_path)
-            return
-        print("Episodios:")
-        for i, ep in enumerate(episodes, 1):
-            try:
-                disp = str(Path(ep).relative_to(season_path))
-            except Exception:
-                disp = ep.name if isinstance(ep, Path) else Path(ep).name
-            print(f"[{i}] {disp}")
-        c = prompt_choice(len(episodes), "Selecciona episodio")
-        if c is None:
-            return
-        ep_path = episodes[c]
-        open_with_default(str(ep_path), player)
-        return
+            continue
+        # usar menú interactivo
+        episode_menu_and_play(episodes, season_path, player, cfg)
+        # volver al listado de doctors
+        continue
 
-    if media_here:
-        print("Episodios directos en la carpeta del Doctor:")
-        for i, ep in enumerate(media_here, 1):
-            print(f"[{i}] {ep.name}")
-        c = prompt_choice(len(media_here), "Selecciona episodio")
-        if c is None:
-            return
-        open_with_default(str(media_here[c]), player)
-        return
 
     # fallback: buscar temporadas más abajo
     candidates = detect_season_dirs(selected_doctor, max_depth=2)
@@ -178,3 +204,65 @@ def run(args, cfg):
     if c is None:
         return
     open_with_default(str(episodes[c]), player)
+
+def episode_menu_and_play(episodes: list, season_path: Path, player: Optional[str], cfg: dict):
+    """
+    Muestra la lista de episodios con estado y permite:
+      - reproducir (p. ej. 'p 3')
+      - marcar visto 'm 3'
+      - desmarcar 'u 3'
+      - marcar todos 'ma'
+      - desmarcar todos 'ua'
+      - volver 'q'
+    """
+    state_path = cfg.get("state_path")  # puede ser None -> usa default
+    while True:
+        state = load_watch_state(state_path)
+        with_status = list_with_watch_status(episodes, state, state_path)
+        print("\nEpisodios:")
+        for i, (ep, watched) in enumerate(with_status, 1):
+            mark = "✓" if watched else " "
+            try:
+                disp = str(Path(ep).relative_to(season_path))
+            except Exception:
+                disp = Path(ep).name
+            print(f"[{i}] [{mark}] {disp}")
+
+        print("\nComandos: p # (play), m # (marcar visto), u # (desmarcar), ma (marcar todos), ua (desmarcar todos), q (volver)")
+        cmd = input(">").strip().lower()
+        if not cmd:
+            continue
+        if cmd == 'q':
+            return
+        if cmd == 'ma':
+            mark_all_in_dir(str(season_path), watched=True, state=state, path=state_path)
+            print("Marcado todo como visto.")
+            continue
+        if cmd == 'ua':
+            mark_all_in_dir(str(season_path), watched=False, state=state, path=state_path)
+            print("Desmarcado todo.")
+            continue
+
+        parts = cmd.split()
+        if len(parts) == 2 and parts[0] in ('p','m','u'):
+            action, num = parts[0], parts[1]
+            if not num.isdigit():
+                print("Número inválido.")
+                continue
+            idx = int(num) - 1
+            if idx < 0 or idx >= len(episodes):
+                print("Índice fuera de rango.")
+                continue
+            ep = episodes[idx]
+            epstr = str(ep)
+            if action == 'p':
+                # reproducir
+                open_with_default(epstr, player)
+            elif action == 'm':
+                mark_watched(epstr, state=state, path=state_path)
+                print("Marcado como visto.")
+            elif action == 'u':
+                mark_unwatched(epstr, state=state, path=state_path)
+                print("Desmarcado.")
+            continue
+        print("Comando desconocido.")
