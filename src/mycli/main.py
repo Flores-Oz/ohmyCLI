@@ -110,3 +110,8 @@ def main(argv=None):
             return
 
     print("Comando no reconocido.")
+
+## python -m pip install --user pipx
+## python -m pipx ensurepath
+## pipx uninstall ohmycli
+## pipx install .
